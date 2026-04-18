@@ -1,0 +1,9 @@
+#ifndef BYPASS_CONFIG_H
+#define BYPASS_CONFIG_H
+
+#define BURST_SIZE 32
+#define NUM_FRAMES 4096
+#define FRAME_SIZE 2048
+#define UMEM_SIZE (NUM_FRAMES * FRAME_SIZE)
+
+#endif // BYPASS_CONFIG_H

@@ -1,0 +1,100 @@
+xdp - express data path - intercepts packets at the lowest possible point in the driver before kernel interacts with it. 
+ebpf - extended berkeley packet filter - maps a shared region of memory between user space and NIC 
+
+BY PASS RT basically implements DPDK runtime. It has three components:
+1. i/o engine handled by AF_XDP - manages socket and lock free rings (queues) used to pass data between kernel and user space 
+2. memory manger (ebpf) - allocates a pool of network buffers so that the application doesnt waste time calling malloc() or free()
+3. polling engine - constantly pulls in bursts of packets, processes them and fires them out seamlessly
+
+- main.c: The entry point of the application. It kicks off the system, binds to a network interface (like eth0 or veth-bypass), and enters an infinite polling loop. When it receives a packet, it reads the raw Ethernet frame, swaps the Source and Destination MAC addresses, and blasts the packet back out. This effectively turns the app into an ultra-fast software loopback/reflector.
+- af_xdp.c & api.h: The heavy lifter that interfaces with the Linux Kernel's libbpf and libxdp libraries. It sets up the UMEM (the shared memory region) and provides an abstracted API to main.c:
+-- lite_init(): Sets up the socket.
+-- lite_rx_burst(): Pulls a batch of packets from the lock-free receive ring.
+-- lite_tx_burst(): Pushes a batch of packets to the lock-free transmit ring.
+- mempool.c & mempool.h: Implements a highly optimized, stack-based memory allocator. At startup, it chops a massive block of memory into fixed size "frames." As packets come and go, standard memory allocation is skipped in favor of simply assigning and returning pre-existing indices from this stack.
+- config.h: (Implicitly) Stores project-wide constants like packet size, burst sizes, and the size of the UMEM block.
+
+eBPF Programs (xdp)
+- xdp_prog.c: This is an actual eBPF C program compiled for the kernel space. Currently, it just executes return XDP_PASS, letting packets flow into the AF_XDP socket. However, this file is intended as a sandbox; you could add logic to inspect IP addresses here and return XDP_DROP to create a hardware-level DDoS protection shield that drops malicious traffic in nanoseconds.
+
+if we use our main ethernet card or wifi card, it would completely kick us off the ssh session and the internet. hence we use virtual ethernet pairs to safely test it.
+
+
+BENCHMARKING:
+
+Phase 1: The Baseline
+1. Create the virtual interfaces:
+sudo ./tests/setup_veth.sh
+
+2. Assign IP addresses so the Linux kernel can route traffic between them:
+sudo ip addr add 10.0.0.1/24 dev veth-peer
+sudo ip addr add 10.0.0.2/24 dev veth-bypass
+
+3. Run the "flood ping" through the standard kernel path, wrapping it in the time command to measure exactly how long it takes:
+time sudo ping -f -c 100000 10.0.0.2 -I veth-peer
+
+4. Record the result! You will see output like this:
+real    0m 1.845s     <-- Total time taken by the standard kernel
+user    0m 0.034s
+sys     0m 1.621s     <-- Time wasted in kernel interrupt handling/context switching
+
+5. Clean up:
+sudo ip link delete veth-bypass
+
+Phase 2: The byPassRT Architecture
+1. Recreate the clean interfaces:
+sudo ./tests/setup_veth.sh
+
+2. Start byPassRT in Terminal 1 (it binds directly to the unconfigured interface):
+sudo ./byPassRT veth-bypass
+
+3. In Terminal 2, run the exact same time benchmark script:
+time sudo ./benchmarks/run_benchmark.sh
+
+4. Compare the results:
+real    0m 0.450s     <-- Much faster total completion time!
+user    0m 0.012s
+sys     0m 0.420s
+
+
+
+### DESTROYING VIRTUAL ETHERNET PAIRS AND INTERFACES
+sudo ip link delete veth-bypass
+
+byPassRT operates entirely at Layer 2 (Raw Ethernet Frames), while the standard Linux ping relies on Layer 3 (IP Addresses). Hence we dont have to assign ip addresses so that the linux kernel can route traffic between them in the bypassrt architecture.
+
+AF_XDP uses exactly four lock-free queues (rings) to function. Two belong to the shared memory chunk (UMEM), managing available/completed memory space. The other two belong to the network Socket (RX for incoming data, TX for outgoing data).
+
+
+
+
+# 1. Reset everything
+sudo ip link delete veth-bypass 2>/dev/null
+sudo ./tests/setup_veth.sh
+
+# 2. Assign IP addresses so the kernel can route
+sudo ip addr add 10.0.0.1/24 dev veth-peer
+sudo ip addr add 10.0.0.2/24 dev veth-bypass
+
+# 3. Blast the packets!
+time sudo ping -q -f -c 100000 10.0.0.2 -I veth-peer
+
+
+-----------------------
+
+
+# 1. Reset everything
+sudo ip link delete veth-bypass 2>/dev/null
+sudo ./tests/setup_veth.sh
+
+# 2. Assign an IP to the sender ONLY
+sudo ip addr add 10.0.0.1/24 dev veth-peer
+
+# 3. CRITICAL Fix: Add a static MAC address for 10.0.0.2 so ping doesn't wait!
+sudo ip neigh add 10.0.0.2 lladdr 02:02:02:02:02:02 dev veth-peer
+
+# 4. Start byPassRT in the background (or in a separate terminal)
+sudo ./byPassRT veth-bypass &
+
+# 5. Blast the packets!
+time sudo ping -q -f -c 100000 10.0.0.2 -I veth-peer

@@ -17,7 +17,6 @@ void handle_signal(int sig) {
     keep_running = 0;
 }
 
-// Simple function to swap MAC addresses for loopback test
 static void swap_mac(uint8_t *data) {
     uint8_t tmp[6];
     memcpy(tmp, data, 6);
@@ -51,8 +50,7 @@ int main(int argc, char *argv[]) {
         int rcvd = lite_rx_burst(pkts, BURST_SIZE);
         if (rcvd > 0) {
             total_rx += rcvd;
-            
-            // Loopback application: swap MACs and send them right back
+
             for (int i = 0; i < rcvd; i++) {
                 if (pkts[i]->data_len >= 14) { // Minimum Ethernet frame
                     swap_mac(pkts[i]->data);
@@ -61,12 +59,11 @@ int main(int argc, char *argv[]) {
 
             int sent = lite_tx_burst(pkts, rcvd);
             total_tx += sent;
-            
-            // Free packets that failed to send
+
             for (int i = sent; i < rcvd; i++) {
                 lite_free(pkts[i]);
             }
-            
+
             printf("\rTotal RX: %lu, Total TX: %lu", total_rx, total_tx);
             fflush(stdout);
         }
